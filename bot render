@@ -1,1 +1,788 @@
+import os
+import re
+import sys
+import shutil
+import logging
+import tempfile
+import asyncio
+import json
+from pathlib import Path
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
+import shutil
+import pytz
+from datetime import datetime
+import re
 
+# إعداد الـ logging
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
+class ManimBot:
+    def __init__(self, token, admin_id):
+        self.token = token
+        self.admin_id = admin_id
+        self.timezone = pytz.timezone('Asia/Baghdad')  # توقيت بغداد
+        
+        # إعداد الجودة الافتراضية
+        self.user_quality = {}  # قاموس لتخزين جودة كل مستخدم
+        self.default_quality = "m"  # الجودة الافتراضية (متوسطة)
+        
+        # تخزين الكود المؤقت للمستخدمين
+        self.pending_code = {}  # قاموس لتخزين الكود المؤقت لكل مستخدم
+        
+        # إعداد اللغات
+        self.user_language = {}  # قاموس لتخزين لغة كل مستخدم
+        self.default_language = "ar"  # اللغة الافتراضية (العربية)
+        
+        # قاموس الترجمات
+        self.translations = {
+            'ar': {  # العربية
+                'welcome': "👋 مرحبًا بك في بوت Manim!\n\nيمكنك إرسال كود Manim وسأقوم بإنشاء فيديو له.\n\nاستخدم /help للحصول على المساعدة.\n\nيمكنك تغيير اللغة باستخدام /language",
+                'help': "🤖 **Manim Bot Help**\n\n**الأوامر المتاحة:**\n- `/start` - رسالة الترحيب\n- `/help` - عرض هذه الرسالة\n- `/quality` - تغيير جودة الفيديو (l: منخفضة، m: متوسطة، h: عالية، k: 4K)\n- `/language` - تغيير لغة البوت\n\n**كيفية الاستخدام:**\n1. أرسل كود Manim مباشرة (بدون أوامر)\n2. تأكد من أن الكود يحتوي على class يرث من Scene\n3. استخدم الدالة construct() لبناء الرسوم المتحركة\n\n**متطلبات الكود:**\n- يجب أن يحتوي على import للـ manim\n- يجب أن يحتوي على class يرث من Scene\n- يجب أن يحتوي على دالة construct()\n\n**مثال صحيح:**\n```python\nfrom manim import *\n\nclass MyScene(Scene):\n    def construct(self):\n        circle = Circle()\n        self.play(Create(circle))\n        self.wait()\n```\n\n**مثال لإنشاء صورة ثابتة:**\n```python\nfrom manim import *\n\nclass StaticImage(Scene):\n    def construct(self):\n        circle = Circle()\n        circle.set_fill(BLUE, opacity=0.5)\n        self.add(circle)\n```\n\n⚠️ **ملاحظة:** تأكد من أن Manim مثبت على النظام مع جميع المتطلبات.",
+                'stats': "📊 **إحصائيات البوت**\n\n🆔 **Admin ID:** {admin_id}\n🤖 **البوت يعمل بشكل طبيعي**\n📁 **دليل العمل:** {cwd}\n🔧 **Python Version:** {python_version}\n🕐 **التوقيت الحالي:** {current_time}\n\n✅ **الحالة:** نشط",
+                'admin_only': "❌ هذا الأمر متاح للمشرف فقط",
+                'processing_code': "🔄 جاري معالجة الكود...",
+                'file_type_error': "❌ يرجى إرسال ملف بامتداد .py أو .txt فقط",
+                'processing_file': "🔄 جاري تحميل الملف ومعالجة الكود...",
+                'file_error': "❌ حدث خطأ أثناء معالجة الملف: {error}",
+                'quality_current': "🎬 **الجودة الحالية:** {quality}\n\nلتغيير الجودة، استخدم:\n`/quality l` - جودة منخفضة (أسرع)\n`/quality m` - جودة متوسطة (افتراضي)\n`/quality h` - جودة عالية\n`/quality k` - جودة 4K (أبطأ)",
+                'quality_invalid': "❌ جودة غير صالحة. الخيارات المتاحة:\n`l` - منخفضة\n`m` - متوسطة\n`h` - عالية\n`k` - 4K",
+                'quality_changed': "✅ تم تغيير الجودة إلى: {quality}",
+                'code_invalid': "❌ الكود غير صحيح. تأكد من وجود class يرث من Scene ودالة construct()",
+                'class_not_found': "❌ لم يتم العثور على class صحيح في الكود",
+                'code_verified': "✅ تم التحقق من الكود بنجاح!\n\nClass: {class_name}\n\n🎬 اختر جودة الفيديو المطلوبة:",
+                'processing_error': "❌ حدث خطأ: {error}",
+                'creating_video': "🎬 جاري إنشاء الفيديو بجودة {quality}...",
+                'creating_image': "🖼️ جاري إنشاء الصورة بجودة {quality}...",
+                'request_expired': "❌ انتهت صلاحية الطلب. يرجى إرسال الكود مرة أخرى.",
+                'sending_video': "📤 جاري إرسال الفيديو...",
+                'sending_image': "📤 جاري إرسال الصورة...",
+                'video_success': "✅ تم إنشاء الفيديو بنجاح!\n\nClass: {class_name}\nالجودة: {quality}",
+                'image_success': "✅ تم إنشاء الصورة بنجاح!\n\nClass: {class_name}\nالجودة: {quality}",
+                'video_fail': "❌ فشل في إنشاء الفيديو:\n```\n{error}\n```",
+                'quality_low': "منخفضة (Low)",
+                'quality_medium': "متوسطة (Medium)",
+                'quality_high': "عالية (High)",
+                'quality_4k': "4K",
+                'language_selection': "🌐 اختر لغة البوت:\n\nاللغة الحالية: {current_language}",
+                'language_changed': "✅ تم تغيير لغة البوت إلى: {language}",
+                'btn_quality_low': "منخفضة (Low)",
+                'btn_quality_medium': "متوسطة (Medium)",
+                'btn_quality_high': "عالية (High)",
+                'btn_quality_4k': "4K",
+                'btn_language_ar': "🇮🇶 العربية",
+                'btn_language_en': "🇬🇧 English",
+                'output_type_selection': "🎬 اختر نوع الإخراج:",
+                'btn_output_video': "🎬 فيديو",
+                'btn_output_image': "🖼️ صورة",
+                'force_video': "✅ تم اختيار إنشاء فيديو",
+                'force_image': "✅ تم اختيار إنشاء صورة"
+            },
+            'en': {  # الإنجليزية
+                'welcome': "👋 Welcome to Manim Bot!\n\nYou can send Manim code and I'll create a video for it.\n\nUse /help to get assistance.\n\nYou can change the language using /language",
+                'help': "🤖 **Manim Bot Help**\n\n**Available Commands:**\n- `/start` - Start the bot\n- `/help` - Show this help\n- `/quality` - Change video quality (l: low, m: medium, h: high, k: 4K)\n- `/language` - Change bot language\n\n**How to Use:**\n1. Send Manim code directly (without commands)\n2. Make sure the code contains a class that inherits from Scene\n3. Use the construct() function to build animations\n\n**Code Requirements:**\n- Must include import for manim\n- Must contain a class that inherits from Scene\n- Must have a construct() function\n\n**Correct Example:**\n```python\nfrom manim import *\n\nclass MyScene(Scene):\n    def construct(self):\n        circle = Circle()\n        self.play(Create(circle))\n        self.wait()\n```\n\n**Example for creating a static image:**\n```python\nfrom manim import *\n\nclass StaticImage(Scene):\n    def construct(self):\n        circle = Circle()\n        circle.set_fill(BLUE, opacity=0.5)\n        self.add(circle)\n```\n\n⚠️ **Note:** Make sure Manim is installed on the system with all requirements.",
+                'stats': "📊 **Bot Statistics**\n\n🆔 **Admin ID:** {admin_id}\n🤖 **Bot is running normally**\n📁 **Working Directory:** {cwd}\n🔧 **Python Version:** {python_version}\n🕐 **Current Time:** {current_time}\n\n✅ **Status:** Active",
+                'admin_only': "❌ This command is only available to the administrator",
+                'processing_code': "🔄 Processing code...",
+                'file_type_error': "❌ Please send only .py or .txt files",
+                'processing_file': "🔄 Downloading file and processing code...",
+                'file_error': "❌ Error processing file: {error}",
+                'quality_current': "🎬 **Current Quality:** {quality}\n\nTo change quality, use:\n`/quality l` - Low quality (faster)\n`/quality m` - Medium quality (default)\n`/quality h` - High quality\n`/quality k` - 4K quality (slower)",
+                'quality_invalid': "❌ Invalid quality. Available options:\n`l` - Low\n`m` - Medium\n`h` - High\n`k` - 4K",
+                'quality_changed': "✅ Quality changed to: {quality}",
+                'code_invalid': "❌ Invalid code. Make sure there's a class inheriting from Scene and a construct() function",
+                'class_not_found': "❌ No valid class found in the code",
+                'code_verified': "✅ Code verified successfully!\n\nClass: {class_name}\n\n🎬 Choose the desired video quality:",
+                'processing_error': "❌ An error occurred: {error}",
+                'creating_video': "🎬 Creating video with {quality} quality...",
+                'creating_image': "🖼️ Creating image with {quality} quality...",
+                'request_expired': "❌ Request expired. Please send the code again.",
+                'sending_video': "📤 Sending video...",
+                'sending_image': "📤 Sending image...",
+                'video_success': "✅ Video created successfully!\n\nClass: {class_name}\nQuality: {quality}",
+                'image_success': "✅ Image created successfully!\n\nClass: {class_name}\nQuality: {quality}",
+                'video_fail': "❌ Failed to create video:\n```\n{error}\n```",
+                'quality_low': "Low",
+                'quality_medium': "Medium",
+                'quality_high': "High",
+                'quality_4k': "4K",
+                'language_selection': "🌐 Choose bot language:\n\nCurrent language: {current_language}",
+                'language_changed': "✅ Bot language changed to: {language}",
+                'btn_quality_low': "Low",
+                'btn_quality_medium': "Medium",
+                'btn_quality_high': "High",
+                'btn_quality_4k': "4K",
+                'btn_language_ar': "🇮🇶 Arabic",
+                'btn_language_en': "🇬🇧 English"
+            }
+        }
+        
+        # إنشاء التطبيق مع إعدادات محسنة
+        self.app = (
+            Application.builder()
+            .token(token)
+            .build()
+        )
+        self.setup_handlers()
+    
+    def setup_handlers(self):
+        """إعداد معالجات الأوامر والرسائل"""
+        self.app.add_handler(CommandHandler("start", self.start))
+        self.app.add_handler(CommandHandler("help", self.help_command))
+        self.app.add_handler(CommandHandler("stats", self.stats_command))
+        self.app.add_handler(CommandHandler("quality", self.quality_command))
+        self.app.add_handler(CommandHandler("language", self.language_command))
+        self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_code))
+        self.app.add_handler(MessageHandler(filters.Document.ALL, self.handle_document))
+        self.app.add_handler(CallbackQueryHandler(self.handle_callback_query))
+        
+    def get_text(self, key, user_id, **kwargs):
+        """الحصول على النص المترجم بناءً على لغة المستخدم"""
+        # تحديد لغة المستخدم
+        lang = self.user_language.get(user_id, self.default_language)
+        
+        # الحصول على النص من قاموس الترجمات
+        text = self.translations.get(lang, {}).get(key, key)
+        
+        # استبدال المتغيرات في النص إذا وجدت
+        if kwargs:
+            text = text.format(**kwargs)
+            
+        return text
+        
+    async def handle_callback_query(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """معالجة الاستجابة للأزرار"""
+        query = update.callback_query
+        await query.answer()
+        
+        # استخراج البيانات من callback_data
+        data = query.data.split('_')
+        
+        if len(data) >= 2:
+            action = data[0]
+            
+            if action == "quality":
+                await self.handle_quality_selection(update, context)
+            elif action == "language":
+                await self.handle_language_selection(update, context)
+            elif action == "output":
+                await self.handle_output_type_selection(update, context)
+                
+    async def handle_quality_selection(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """معالجة اختيار المستخدم للجودة"""
+        query = update.callback_query
+        
+        # استخراج المعلومات من callback_data
+        data = query.data.split('_')
+        if len(data) < 3 or data[0] != "quality":
+            return
+        
+        quality = data[1]  # l, m, h, k
+        user_id = int(data[2])  # معرف المستخدم
+        
+        # التحقق من وجود الكود المؤقت للمستخدم
+        if user_id not in self.pending_code:
+            await query.edit_message_text(self.get_text('request_expired', user_id))
+            return
+        
+        # استرجاع معلومات الكود
+        code_info = self.pending_code[user_id]
+        code = code_info['code']
+        class_name = code_info['class_name']
+        force_output_type = code_info.get('force_output_type')
+        
+        # تحديد ما إذا كانت صورة أو فيديو
+        has_add = code_info.get('has_add', False)
+        has_play = code_info.get('has_play', False)
+        
+        # تحديد نوع الإخراج بناءً على الخيار المفروض أو التحليز التلقائي
+        is_image = False
+        if force_output_type == "image":
+            is_image = True
+        elif force_output_type == "video":
+            is_image = False
+        else:
+            # التحديد التلقائي: إذا كان هناك self.add فقط، فهو صورة
+            is_image = has_add and not has_play
+        
+        # الحصول على اسم الجودة
+        quality_name = self.get_quality_name(quality)
+        
+        # تحديث الرسالة
+        if is_image:
+            await query.edit_message_text(self.get_text('creating_image', user_id, quality=quality_name))
+        else:
+            await query.edit_message_text(self.get_text('creating_video', user_id, quality=quality_name))
+        
+        # تنفيذ عملية الرندر
+        try:
+            # إنشاء مجلد مؤقت للمشروع
+            with tempfile.TemporaryDirectory() as temp_dir:
+                temp_path = Path(temp_dir)
+                
+                # كتابة الكود في ملف
+                code_file = temp_path / f"scene_{user_id}.py"
+                with open(code_file, 'w', encoding='utf-8') as f:
+                    f.write(code)
+                
+                # تشغيل Manim
+                success, output_path, error = await self.run_manim(code_file, class_name, temp_path, quality, is_image)
+                
+                if success and output_path and os.path.exists(output_path):
+                    if is_image:
+                        # إرسال الصورة
+                        await query.edit_message_text(self.get_text('sending_image', user_id))
+                        
+                        with open(output_path, 'rb') as image_file:
+                            await context.bot.send_photo(
+                                chat_id=update.effective_chat.id,
+                                photo=image_file,
+                                caption=self.get_text('image_success', user_id, class_name=class_name, quality=quality_name)
+                            )
+                    else:
+                        # إرسال الفيديو
+                        await query.edit_message_text(self.get_text('sending_video', user_id))
+                        
+                        with open(output_path, 'rb') as video_file:
+                            await context.bot.send_video(
+                                chat_id=update.effective_chat.id,
+                                video=video_file,
+                                caption=self.get_text('video_success', user_id, class_name=class_name, quality=quality_name)
+                            )
+                    
+                    # حذف رسالة المعالجة
+                    await query.delete_message()
+                    
+                else:
+                    error_msg = self.get_text('video_fail', user_id, error=error)
+                    await query.edit_message_text(error_msg[:4000], parse_mode='Markdown')
+        
+        except Exception as e:
+            logger.error(f"خطأ في معالجة الكود: {e}")
+            await query.edit_message_text(self.get_text('processing_error', user_id, error=str(e)))
+        
+        # حذف الكود المؤقت بعد المعالجة
+        if user_id in self.pending_code:
+            del self.pending_code[user_id]
+    
+    async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """رسالة البداية"""
+        user_id = update.effective_user.id
+        
+        # إذا كان المستخدم جديدًا، نعرض له خيارات اللغة
+        if user_id not in self.user_language:
+            # إنشاء أزرار اختيار اللغة
+            keyboard = [
+                [InlineKeyboardButton("🇮🇶 العربية", callback_data=f"language_ar_{user_id}")],
+                [InlineKeyboardButton("🇬🇧 English", callback_data=f"language_en_{user_id}")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            # عرض رسالة اختيار اللغة
+            await update.message.reply_text(
+                "🌐 مرحبًا! اختر لغة البوت:\n\nWelcome! Choose bot language:",
+                reply_markup=reply_markup
+            )
+            return
+        
+        # إذا كان المستخدم قد اختار لغة من قبل، نعرض رسالة الترحيب بلغته
+        welcome_message = self.get_text('welcome', user_id)
+        await update.message.reply_text(welcome_message, parse_mode='Markdown')
+    
+    async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """رسالة المساعدة"""
+        user_id = update.effective_user.id
+        
+        # إذا كان المستخدم جديدًا، نعرض له خيارات اللغة أولاً
+        if user_id not in self.user_language:
+            await self.start(update, context)
+            return
+        
+        # عرض رسالة المساعدة بلغة المستخدم
+        help_message = self.get_text('help', user_id)
+        await update.message.reply_text(help_message, parse_mode='Markdown')
+    
+    async def stats_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """إحصائيات البوت (للمشرف فقط)"""
+        user_id = update.effective_user.id
+        
+        # إذا كان المستخدم جديدًا، نعرض له خيارات اللغة أولاً
+        if user_id not in self.user_language:
+            await self.start(update, context)
+            return
+        
+        if user_id != self.admin_id:
+            await update.message.reply_text(self.get_text('admin_only', user_id))
+            return
+        
+        # الحصول على التوقيت الحالي
+        current_time = datetime.now(self.timezone).strftime("%Y-%m-%d %H:%M:%S")
+        
+        # إعداد المتغيرات للترجمة
+        stats_vars = {
+            'admin_id': self.admin_id,
+            'cwd': os.getcwd(),
+            'python_version': os.sys.version.split()[0],
+            'current_time': current_time
+        }
+        
+        # الحصول على النص المترجم
+        stats_message = self.get_text('stats', user_id, **stats_vars)
+        
+        await update.message.reply_text(stats_message, parse_mode='Markdown')
+
+    async def handle_code(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """معالجة كود Manim المرسل كنص"""
+        user_id = update.effective_user.id
+        
+        # إذا كان المستخدم جديدًا، نعرض له خيارات اللغة أولاً
+        if user_id not in self.user_language:
+            await self.start(update, context)
+            return
+            
+        code = update.message.text
+        username = update.effective_user.username or "Unknown"
+        
+        # تسجيل الطلب مع التوقيت
+        current_time = datetime.now(self.timezone).strftime("%Y-%m-%d %H:%M:%S")
+        logger.info(f"[{current_time}] طلب جديد من المستخدم {username} (ID: {user_id})")
+        
+        # إرسال رسالة تأكيد
+        processing_msg = await update.message.reply_text(self.get_text('processing_code', user_id))
+        
+        # التعامل مع الكود الطويل (أكثر من 4000 حرف)
+        if len(code) > 4000:
+            logger.info(f"معالجة كود طويل ({len(code)} حرف) من المستخدم {username}")
+            # تقسيم الكود إلى أجزاء للتسجيل فقط
+            code_parts = [code[i:i+1000] for i in range(0, len(code), 1000)]
+            logger.debug(f"تم تقسيم الكود إلى {len(code_parts)} جزء")
+        
+        await self.process_code(code, user_id, update, processing_msg)
+    
+    async def handle_document(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """معالجة الملفات المرفقة (py أو txt)"""
+        user_id = update.effective_user.id
+        
+        # إذا كان المستخدم جديدًا، نعرض له خيارات اللغة أولاً
+        if user_id not in self.user_language:
+            await self.start(update, context)
+            return
+            
+        username = update.effective_user.username or "Unknown"
+        
+        # تسجيل الطلب مع التوقيت
+        current_time = datetime.now(self.timezone).strftime("%Y-%m-%d %H:%M:%S")
+        logger.info(f"[{current_time}] طلب ملف من المستخدم {username} (ID: {user_id})")
+        
+        # التحقق من نوع الملف
+        document = update.message.document
+        file_name = document.file_name
+        
+        if not (file_name.endswith('.py') or file_name.endswith('.txt')):
+            await update.message.reply_text(self.get_text('file_type_error', user_id))
+            return
+        
+        # إرسال رسالة تأكيد
+        processing_msg = await update.message.reply_text(self.get_text('processing_file', user_id))
+        
+        try:
+            # تنزيل الملف
+            file = await context.bot.get_file(document.file_id)
+            
+            with tempfile.TemporaryDirectory() as temp_dir:
+                temp_path = Path(temp_dir)
+                download_path = temp_path / file_name
+                
+                await file.download_to_drive(download_path)
+                
+                # قراءة محتوى الملف مع محاولة ترميزات مختلفة
+                def read_file_with_fallback_encoding(file_path):
+                    encodings = ['utf-8', 'latin-1', 'cp1256', 'utf-16']
+                    for encoding in encodings:
+                        try:
+                            with open(file_path, 'r', encoding=encoding) as f:
+                                return f.read()
+                        except UnicodeDecodeError:
+                            continue
+                    # إذا فشلت جميع الترميزات، استخدم الترميز الثنائي مع استبدال الأحرف غير الصالحة
+                    with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
+                        return f.read()
+                
+                # استخدام الدالة الجديدة
+                code = read_file_with_fallback_encoding(download_path)
+                
+                await self.process_code(code, user_id, update, processing_msg)
+                
+        except Exception as e:
+            logger.error(f"خطأ في معالجة الملف: {e}")
+            await processing_msg.edit_text(self.get_text('file_error', user_id, error=str(e)))
+    
+    async def language_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """تغيير لغة البوت"""
+        user_id = update.effective_user.id
+        
+        # إذا كان المستخدم جديدًا، نعرض له خيارات اللغة أولاً
+        if user_id not in self.user_language:
+            await self.start(update, context)
+            return
+        
+        # عرض خيارات اللغة
+        current_language = self.user_language.get(user_id, self.default_language)
+        current_language_name = "العربية" if current_language == "ar" else "English"
+        
+        # إنشاء أزرار اختيار اللغة
+        keyboard = [
+            [InlineKeyboardButton("🇮🇶 العربية", callback_data=f"language_ar_{user_id}")],
+            [InlineKeyboardButton("🇬🇧 English", callback_data=f"language_en_{user_id}")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        # عرض رسالة اختيار اللغة
+        await update.message.reply_text(
+            self.get_text('language_selection', user_id, current_language=current_language_name),
+            reply_markup=reply_markup
+        )
+    
+    async def handle_language_selection(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """معالجة اختيار المستخدم للغة"""
+        query = update.callback_query
+        
+        # استخراج المعلومات من callback_data
+        data = query.data.split('_')
+        if len(data) < 3 or data[0] != "language":
+            return
+        
+        language = data[1]  # ar, en
+        user_id = int(data[2])  # معرف المستخدم
+        
+        # حفظ اللغة للمستخدم
+        self.user_language[user_id] = language
+        
+        # تحديد اسم اللغة للعرض
+        language_name = "العربية" if language == "ar" else "English"
+        
+        # إرسال رسالة تأكيد بلغة المستخدم الجديدة
+        await query.edit_message_text(
+            self.get_text('language_changed', user_id, language=language_name)
+        )
+        
+        # إرسال رسالة الترحيب بعد تغيير اللغة
+        welcome_message = self.get_text('welcome', user_id)
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=welcome_message,
+            parse_mode='Markdown'
+        )
+    
+    async def quality_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """تغيير جودة الفيديو"""
+        user_id = update.effective_user.id
+        
+        # إذا كان المستخدم جديدًا، نعرض له خيارات اللغة أولاً
+        if user_id not in self.user_language:
+            await self.start(update, context)
+            return
+            
+        args = context.args
+        
+        if not args:
+            # عرض الجودة الحالية
+            current_quality = self.user_quality.get(user_id, self.default_quality)
+            quality_name = self.get_quality_name(current_quality)
+            
+            await update.message.reply_text(
+                self.get_text('quality_current', user_id, quality=quality_name),
+                parse_mode='Markdown'
+            )
+            return
+        
+        # تحديث الجودة
+        quality = args[0].lower()
+        if quality not in ['l', 'm', 'h', 'k']:
+            await update.message.reply_text(
+                self.get_text('quality_invalid', user_id),
+                parse_mode='Markdown'
+            )
+            return
+        
+        # حفظ الجودة للمستخدم
+        self.user_quality[user_id] = quality
+        quality_name = self.get_quality_name(quality)
+        
+        await update.message.reply_text(self.get_text('quality_changed', user_id, quality=quality_name))
+    
+    def get_quality_name(self, quality_code):
+        """الحصول على اسم الجودة من الرمز"""
+        quality_names = {
+            'l': "منخفضة (Low)",
+            'm': "متوسطة (Medium)",
+            'h': "عالية (High)",
+            'k': "4K"
+        }
+        return quality_names.get(quality_code, "متوسطة (Medium)")
+    
+    async def process_code(self, code, user_id, update, processing_msg):
+        """معالجة الكود سواء كان نصًا أو ملف"""
+        try:
+            # التحقق من صحة الكود
+            if not self.validate_code(code):
+                await processing_msg.edit_text(self.get_text('code_invalid', user_id))
+                return
+            
+            # استخراج اسم الـ class
+            class_name = self.extract_class_name(code)
+            if not class_name:
+                await processing_msg.edit_text(self.get_text('class_not_found', user_id))
+                return
+            
+            # التحقق من وجود self.add و self.play باستخدام regex أكثر قوة
+            add_pattern = re.compile(r'(?<![\w\d_])self\.add\s*\(', re.MULTILINE)
+            play_pattern = re.compile(r'(?<![\w\d_])self\.play\s*\(', re.MULTILINE)
+            
+            # تحسين اكتشاف الدوال بالبحث في الكود بعد إزالة التعليقات
+            def remove_comments(code_str):
+                # إزالة تعليقات السطر الواحد
+                code_without_comments = re.sub(r'#.*$', '', code_str, flags=re.MULTILINE)
+                # إزالة تعليقات متعددة الأسطر
+                code_without_comments = re.sub(r'"""[\s\S]*?"""', '', code_without_comments)
+                code_without_comments = re.sub(r"'''[\s\S]*?'''", '', code_without_comments)
+                return code_without_comments
+            
+            # استخدام الكود بعد إزالة التعليقات للبحث
+            code_clean = remove_comments(code)
+            has_add = bool(add_pattern.search(code_clean))
+            has_play = bool(play_pattern.search(code_clean))
+            
+            # تخزين الكود مؤقتًا للمستخدم
+            self.pending_code[user_id] = {
+                'code': code,
+                'class_name': class_name,
+                'message_id': processing_msg.message_id,
+                'chat_id': update.effective_chat.id,
+                'has_add': has_add,
+                'has_play': has_play,
+                'force_output_type': None  # إضافة حقل جديد لتخزين نوع الإخراج المفروض
+            }
+            
+            # إنشاء أزرار اختيار نوع الإخراج
+            keyboard = [
+                [
+                    InlineKeyboardButton(self.get_text('btn_output_video', user_id), callback_data=f"output_video_{user_id}"),
+                    InlineKeyboardButton(self.get_text('btn_output_image', user_id), callback_data=f"output_image_{user_id}")
+                ]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            # عرض خيارات نوع الإخراج للمستخدم
+            await processing_msg.edit_text(
+                self.get_text('output_type_selection', user_id),
+                reply_markup=reply_markup
+            )
+            
+        except Exception as e:
+            logger.error(f"خطأ في معالجة الكود: {e}")
+            await processing_msg.edit_text(self.get_text('processing_error', user_id, error=str(e)))
+    
+    def validate_code(self, code):
+        """التحقق من صحة كود Manim"""
+        # تحقق أساسي من وجود العناصر المطلوبة
+        has_import = 'from manim import' in code or 'import manim' in code
+        
+        # البحث عن class يرث من Scene
+        class_pattern = re.compile(r'class\s+\w+\s*\([^)]*Scene[^)]*\)')
+        has_class = bool(class_pattern.search(code))
+        
+        # البحث عن دالة construct
+        construct_pattern = re.compile(r'def\s+construct\s*\(')
+        has_construct = bool(construct_pattern.search(code))
+        
+        return has_import and has_class and has_construct
+    
+    def extract_class_name(self, code):
+        """استخراج اسم الـ class من الكود بطريقة أكثر قوة"""
+        # استخدام التعبير النمطي المحسن للعثور على أول class يرث من Scene
+        class_pattern = re.compile(r'class\s+(\w+)\s*\([^)]*(?:Scene|ThreeDScene|MovingCameraScene)[^)]*\)')
+        match = class_pattern.search(code)
+        
+        if match:
+            return match.group(1)  # إرجاع اسم الـ class
+        
+        # طريقة احتياطية في حالة فشل التعبير النمطي
+        # البحث عن أي class يحتوي على دالة construct
+        lines = code.split('\n')
+        current_class = None
+        
+        for i, line in enumerate(lines):
+            line = line.strip()
+            class_match = re.match(r'class\s+(\w+)', line)
+            if class_match:
+                current_class = class_match.group(1)
+            elif current_class and 'def construct' in line:
+                return current_class
+        
+        # إذا لم يتم العثور على أي class مناسب، نبحث عن أي class
+        for line in lines:
+            line = line.strip()
+            class_match = re.match(r'class\s+(\w+)', line)
+            if class_match:
+                return class_match.group(1)
+        
+        return None
+    
+    async def handle_output_type_selection(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """معالجة اختيار المستخدم لنوع الإخراج (فيديو أو صورة)"""
+        query = update.callback_query
+        await query.answer()
+        
+        # استخراج المعلومات من callback_data
+        data = query.data.split('_')
+        if len(data) < 3 or data[0] != "output":
+            return
+        
+        output_type = data[1]  # video أو image
+        user_id = int(data[2])  # معرف المستخدم
+        
+        # التحقق من وجود الكود المؤقت للمستخدم
+        if user_id not in self.pending_code:
+            await query.edit_message_text(self.get_text('request_expired', user_id))
+            return
+        
+        # تحديث نوع الإخراج المفروض
+        self.pending_code[user_id]['force_output_type'] = output_type
+        
+        # إنشاء أزرار اختيار الجودة
+        keyboard = [
+            [
+                InlineKeyboardButton(self.get_text('btn_quality_low', user_id), callback_data=f"quality_l_{user_id}"),
+                InlineKeyboardButton(self.get_text('btn_quality_medium', user_id), callback_data=f"quality_m_{user_id}")
+            ],
+            [
+                InlineKeyboardButton(self.get_text('btn_quality_high', user_id), callback_data=f"quality_h_{user_id}"),
+                InlineKeyboardButton(self.get_text('btn_quality_4k', user_id), callback_data=f"quality_k_{user_id}")
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        # عرض رسالة تأكيد اختيار نوع الإخراج وخيارات الجودة
+        message_text = self.get_text(f'force_{output_type}', user_id) + "\n\n" + \
+                      self.get_text('code_verified', user_id, class_name=self.pending_code[user_id]['class_name'])
+        
+        await query.edit_message_text(
+            message_text,
+            reply_markup=reply_markup
+        )
+    
+    async def run_manim(self, code_file, class_name, temp_path, quality, is_image=False, fps="30"):
+        """تشغيل Manim لإنشاء فيديو أو صورة"""
+        try:
+            # إنشاء مجلدات مؤقتة للعمل
+            output_dir = temp_path / "media"
+            output_dir.mkdir(exist_ok=True)
+            
+            # بناء أمر Manim
+            cmd = [
+                "manim",
+                "render",
+                str(code_file),
+                class_name,
+                "--media_dir", str(output_dir),
+                "-q", quality  # استخدام الجودة المحددة
+            ]
+                
+            # إضافة خيارات إضافية بناءً على نوع الإخراج (صورة أو فيديو)
+            if is_image:
+                # إضافة خيار -s لإنشاء صورة ثابتة
+                cmd.append("-s")
+            else:
+                # إضافة خيارات الفيديو
+                cmd.extend(["--format", "mp4", "--fps", fps])
+            
+            # إضافة خيار تعطيل التخزين المؤقت
+            cmd.append("--disable_caching")
+            
+            # تشغيل الأمر
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=str(temp_path)
+            )
+            
+            stdout, stderr = await process.communicate()
+            
+            if process.returncode == 0:
+                # البحث عن ملف الإخراج (فيديو أو صورة)
+                output_path = self.find_output_file(output_dir, is_image)
+                return True, output_path, None
+            else:
+                # استخدام errors='replace' لاستبدال الأحرف غير الصالحة بعلامة استفهام
+                error_msg = stderr.decode('utf-8', errors='replace') if stderr else "خطأ غير معروف"
+                # تنظيف النص من أي أحرف قد تسبب مشاكل في Markdown
+                error_msg = error_msg.replace('`', '\\`').replace('*', '\\*').replace('_', '\\_')
+                # تقصير رسالة الخطأ إذا كانت طويلة جدًا مع الاحتفاظ بالأجزاء المهمة
+                if len(error_msg) > 3900:
+                    # الاحتفاظ بالبداية والنهاية من رسالة الخطأ
+                    error_start = error_msg[:1900]
+                    error_end = error_msg[-1900:]
+                    error_msg = f"{error_start}\n\n... (تم اختصار جزء من رسالة الخطأ) ...\n\n{error_end}"
+                return False, None, error_msg
+                    
+        except Exception as e:
+            return False, None, str(e)
+    
+    def find_output_file(self, output_dir, is_image=False):
+        """البحث عن ملف الإخراج (فيديو أو صورة) في مجلد الإخراج"""
+        if is_image:
+            # البحث عن ملفات الصور
+            image_extensions = ['.png', '.jpg', '.jpeg', '.svg']
+            
+            for root, dirs, files in os.walk(output_dir):
+                for file in files:
+                    if any(file.lower().endswith(ext) for ext in image_extensions):
+                        return os.path.join(root, file)
+        else:
+            # البحث عن ملفات الفيديو
+            video_extensions = ['.mp4', '.mov', '.avi']
+            
+            for root, dirs, files in os.walk(output_dir):
+                for file in files:
+                    if any(file.lower().endswith(ext) for ext in video_extensions):
+                        return os.path.join(root, file)
+        
+        return None
+        
+    def run(self):
+        """تشغيل البوت"""
+        print("🤖 تم تشغيل Manim Bot...")
+        self.app.run_polling(drop_pending_updates=True)
+
+def main():
+    """الدالة الرئيسية"""
+    print("بدء تشغيل Manim Bot...")
+    # ضع token البوت هنا
+    TOKEN = "7613379698:AAEGFbjKgVrzBPXHPUnFzaXDwGHdAziDZng"
+    ADMIN_ID = 7736869278  # ID الخاص بك للتحكم في البوت
+    
+    if TOKEN == "YOUR_BOT_TOKEN_HERE":
+        print("❌ يرجى إدخال token البوت الصحيح")
+        print("1. اذهب إلى @BotFather في تيليجرام")
+        print("2. أنشئ بوت جديد واحصل على الـ token")
+        print("3. استبدل 'YOUR_BOT_TOKEN_HERE' بالـ token الحقيقي")
+        return
+    
+    # التحقق من وجود Manim
+    if not shutil.which("manim"):
+        print("❌ Manim غير مثبت على النظام")
+        print("قم بتثبيته باستخدام: pip install manim")
+        return
+    
+    # إنشاء وتشغيل البوت
+    bot = ManimBot(TOKEN, ADMIN_ID)
+    bot.run()
+
+if __name__ == "__main__":
+    main()
